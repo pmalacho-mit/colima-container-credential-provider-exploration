@@ -32,7 +32,7 @@ yet production-hardened (see [Limitations](#limitations)).
    ├─ devcontainer.json
    ├─ dc-initialize.sh        # runs on the HOST before the container is created
    ├─ cred-install.sh         # runs IN the container at first create
-   └─ cred-fetch.sh           # helper used by cred-install.sh
+   └─ cred-fetch.sh           # helper used by cred-install.sh (uses curl)
 ```
 
 > `cred-broker.py` is reference only. The broker that actually runs is embedded in
@@ -45,6 +45,10 @@ yet production-hardened (see [Limitations](#limitations)).
 - [Homebrew](https://brew.sh)
 - VS Code with the **Dev Containers** extension
 - `openssl` and `security` are built into macOS — nothing to install
+
+The devcontainer image must ship `curl` and `sudo`. The default image here,
+`mcr.microsoft.com/devcontainers/base:ubuntu-24.04`, includes both and runs as a
+non-root `vscode` user; if you swap images, see [Customizing](#customizing).
 
 ## Setup (once per machine)
 
@@ -93,7 +97,10 @@ security add-generic-password -a "$USER" -s "devcred-secret_A" -w
 ## Verify the security property
 
 `test.sh` is self-contained (it registers literal test values, no Keychain needed)
-and proves the core guarantee, including the attack. Run it after the profile is up:
+and proves the core guarantee, including the attack. The test client uses a raw
+HTTP request from a tiny `python:3-slim` container so it needs nothing extra; your
+real devcontainer uses `curl`. Both hit the same broker. Run it after the profile
+is up:
 
 ```sh
 ./test.sh
@@ -130,7 +137,8 @@ the broker checks the caller's container id, not who can reach the socket.
 
 VS Code runs `dc-initialize.sh` on the host (mints a one-time nonce, reads the
 secret from your Keychain, registers it with the broker), then `cred-install.sh`
-inside the container fetches the secret once and exposes it to every shell.
+inside the container fetches the secret once with `curl` and exposes it to every
+shell. The container runs as the non-root `vscode` user.
 
 3. In a container terminal, confirm the credential is available to programs:
 
@@ -161,9 +169,9 @@ presents it; any other id is refused. So reachability of the socket is not acces
 
 **Secret delivery.** The host resolves the secret from the Keychain and registers
 the value with the broker over a root-only control socket; the broker holds it only
-in memory. The container fetches it during trusted init and writes it to a tmpfs
-file sourced by all shells — available to every program, but kept out of
-`docker inspect`.
+in memory. The container fetches it during trusted init — `curl` over the broker's
+HTTP unix socket, no python in the container — and writes it to a tmpfs file sourced
+by all shells. Available to every program, but kept out of `docker inspect`.
 
 ## Customizing
 
@@ -172,6 +180,10 @@ file sourced by all shells — available to every program, but kept out of
   `initializeCommand`, and store a matching `devcred-<name>` Keychain entry.
 - **Multiple variables:** store several `KEY=VALUE` lines in one Keychain entry;
   they all become environment variables in the container.
+- **Different devcontainer image:** keep it one that ships `curl` and `sudo`. If its
+  default user isn't uid/gid 1000, update the `--tmpfs /run/cred:...uid=,gid=` values
+  in `devcontainer.json` to match (run `id` inside the container to check). To run as
+  root instead, add `"remoteUser": "root"` and you can drop the `uid=`/`gid=` options.
 - **Different trust tiers:** run a second profile (`colima start <other>`) with a
   different mount and its own broker for containers that need more or less access.
 
@@ -184,8 +196,9 @@ file sourced by all shells — available to every program, but kept out of
   registrations; just re-launch the container to re-register.
 - This is the secret-isolation half only. The companion piece is a Docker-socket
   proxy that prevents a container from creating privileged children or bind-mounting
-  the broker socket; without it, the broker's identity check is still the backstop,
-  but defense-in-depth is incomplete.
+  the broker socket, and denies `docker cp`/`exec`/`export` for this tier (which is
+  what would otherwise read the ambient secret file). Without it, the broker's
+  identity check is still the backstop, but defense-in-depth is incomplete.
 
 ## Troubleshooting
 
@@ -196,8 +209,13 @@ file sourced by all shells — available to every program, but kept out of
   different VM than expected, or the cgroup id didn't parse. Check the cgroup format
   with `colima ssh secure -- cat /proc/1/cgroup` (the broker matches a 64-hex id).
 - **`$API_KEY` is empty in a terminal** — `/etc/profile.d` is sourced by login
-  shells, so open a fresh terminal; and `cred-install.sh` needs root to write there
-  (fine on `python:3-slim`; otherwise prefix with `sudo`).
+  shells, so open a fresh terminal. `cred-install.sh` writes that file with `sudo`,
+  which needs the container user to have passwordless sudo (the `vscode` user in the
+  base image does). And the tmpfs at `/run/cred` must be owned by the container user
+  — see the `uid=`/`gid=` note under [Customizing](#customizing).
+- **`curl: command not found` during create** — your image doesn't ship curl; add it
+  (e.g. a devcontainer feature, or `apt-get install -y curl` in `onCreateCommand`
+  before the fetch), or use the default base image.
 - **Container lands in the wrong VM** — you didn't pin the context; run
   `docker context use colima-secure` before reopening.
 - **`security: ... could not be found`** — seed the Keychain first (step 3); the
