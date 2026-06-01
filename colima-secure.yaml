@@ -1,0 +1,113 @@
+cpu: 2
+memory: 4
+disk: 30
+vmType: vz
+mountType: virtiofs
+
+mounts:
+  - location: ~/code/repos
+    writable: true
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/sh
+      set -eu
+      command -v python3 >/dev/null 2>&1 || { apt-get update && apt-get install -y python3; }
+      mkdir -p /run/cred-broker
+
+      cat > /usr/local/bin/cred-broker.py <<'PY'
+      import os, re, socket, struct, threading
+      CTRL = "/run/cred-broker/control.sock"
+      CLIENT = "/run/cred-broker/client.sock"
+      SO_PEERCRED = 17
+      CID = re.compile(rb"[0-9a-f]{64}")
+      reg = {}
+      lock = threading.Lock()
+      def cid_of(pid):
+          try:
+              with open(f"/proc/{pid}/cgroup", "rb") as f:
+                  m = CID.search(f.read())
+              return m.group(0) if m else None
+          except OSError:
+              return None
+      def recv_all(conn):
+          buf = b""
+          while True:
+              chunk = conn.recv(4096)
+              if not chunk:
+                  return buf
+              buf += chunk
+      def http(conn, status, body):
+          head = ("HTTP/1.1 %d X\r\nContent-Length: %d\r\nConnection: close\r\n\r\n" % (status, len(body))).encode()
+          conn.sendall(head + body)
+      def serve_client(conn):
+          with conn:
+              raw = conn.getsockopt(socket.SOL_SOCKET, SO_PEERCRED, struct.calcsize("3i"))
+              pid, _, _ = struct.unpack("3i", raw)
+              cid = cid_of(pid)
+              line = conn.recv(4096).split(b"\r\n", 1)[0].decode("latin1")
+              nonce = ""
+              if "nonce=" in line:
+                  nonce = line.split("nonce=", 1)[1].split()[0].split("&")[0].strip()
+              with lock:
+                  entry = reg.get(nonce)
+                  if not entry or not cid or (entry["cid"] is not None and entry["cid"] != cid):
+                      return http(conn, 403, b"DENIED")
+                  if entry["cid"] is None:
+                      entry["cid"] = cid
+                  return http(conn, 200, entry["value"])
+      def serve_ctrl(conn):
+          with conn:
+              head, _, value = recv_all(conn).partition(b"\n")
+              parts = head.split()
+              if len(parts) == 2 and parts[0] == b"register":
+                  with lock:
+                      reg[parts[1].decode()] = {"value": value.rstrip(b"\n"), "cid": None}
+                  conn.sendall(b"OK\n")
+              else:
+                  conn.sendall(b"ERR\n")
+      def listener(path, handler, mode):
+          try:
+              os.unlink(path)
+          except FileNotFoundError:
+              pass
+          s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+          s.bind(path); os.chmod(path, mode); s.listen(16)
+          while True:
+              c, _ = s.accept()
+              threading.Thread(target=handler, args=(c,), daemon=True).start()
+      os.makedirs("/run/cred-broker", exist_ok=True)
+      threading.Thread(target=listener, args=(CTRL, serve_ctrl, 0o600), daemon=True).start()
+      listener(CLIENT, serve_client, 0o666)
+      PY
+
+      cat > /usr/local/bin/cred-broker-ctl <<'PY'
+      #!/usr/bin/env python3
+      import socket, sys
+      nonce = sys.argv[2]
+      value = sys.stdin.buffer.read()
+      s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+      s.connect("/run/cred-broker/control.sock")
+      s.sendall(b"register " + nonce.encode() + b"\n" + value)
+      s.shutdown(socket.SHUT_WR)
+      print(s.recv(64).decode().strip())
+      PY
+      chmod +x /usr/local/bin/cred-broker-ctl
+
+      cat > /etc/systemd/system/cred-broker.service <<'UNIT'
+      [Unit]
+      Description=Per-container credential broker
+      After=network.target
+
+      [Service]
+      ExecStart=/usr/bin/python3 /usr/local/bin/cred-broker.py
+      Restart=always
+      User=root
+
+      [Install]
+      WantedBy=multi-user.target
+      UNIT
+
+      systemctl daemon-reload
+      systemctl enable --now cred-broker.service

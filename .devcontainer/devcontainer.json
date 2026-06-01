@@ -1,4 +1,4 @@
-// devcontainer.json — restricted devcontainer, ambient credentials.
+// devcontainer.json — restricted devcontainer on a non-root Ubuntu base image.
 //
 // LAYOUT: put dc-initialize.sh, cred-install.sh, cred-fetch.sh, and this file
 // in .devcontainer/. Add ".devcontainer/.broker-nonce" to .gitignore.
@@ -10,19 +10,24 @@
 // host automatically; no devcontainer CLI needed.
 {
   "name": "secure-devcontainer",
-  "image": "python:3-slim",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
 
   // HOST hook: mint nonce, read Keychain, register with broker, stash nonce.
   "initializeCommand": "bash .devcontainer/dc-initialize.sh secure secret_A",
 
-  // tmpfs for the ambient secret file; label for the proxy/broker policy.
-  "runArgs": ["--label", "tier=secret_A", "--tmpfs", "/run/cred:mode=0700"],
+  // tmpfs for the ambient secret file, OWNED BY the default 'vscode' user
+  // (uid/gid 1000) so the non-root user can write and read it; plus the tier
+  // label for the proxy/operator.
+  "runArgs": [
+    "--label", "tier=secret_A",
+    "--tmpfs", "/run/cred:mode=0700,uid=1000,gid=1000"
+  ],
 
   // mount ONLY the client socket file (never the dir -> control.sock stays hidden).
   "mounts": [
     "source=/run/cred-broker/client.sock,target=/run/cred-broker.sock,type=bind"
   ],
 
-  // CONTAINER trusted-init: fetch once, expose to all shells/programs.
+  // CONTAINER trusted-init: fetch once (via curl), expose to all shells/programs.
   "onCreateCommand": "sh .devcontainer/cred-install.sh"
 }
