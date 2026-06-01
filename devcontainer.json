@@ -1,0 +1,28 @@
+// devcontainer.json — restricted devcontainer, ambient credentials.
+//
+// LAYOUT: put dc-initialize.sh, cred-install.sh, cred-fetch.sh, and this file
+// in .devcontainer/. Add ".devcontainer/.broker-nonce" to .gitignore.
+//
+// BEFORE OPENING: pin VS Code to the profile so the container lands in the
+// right VM (the active context is global, so be explicit):
+//   docker context use colima-secure        # or export DOCKER_HOST=...secure...
+// Then: "Dev Containers: Reopen in Container". initializeCommand runs on the
+// host automatically; no devcontainer CLI needed.
+{
+  "name": "secure-devcontainer",
+  "image": "python:3-slim",
+
+  // HOST hook: mint nonce, read Keychain, register with broker, stash nonce.
+  "initializeCommand": "bash .devcontainer/dc-initialize.sh secure secret_A",
+
+  // tmpfs for the ambient secret file; label for the proxy/broker policy.
+  "runArgs": ["--label", "tier=secret_A", "--tmpfs", "/run/cred:mode=0700"],
+
+  // mount ONLY the client socket file (never the dir -> control.sock stays hidden).
+  "mounts": [
+    "source=/run/cred-broker/client.sock,target=/run/cred-broker.sock,type=bind"
+  ],
+
+  // CONTAINER trusted-init: fetch once, expose to all shells/programs.
+  "onCreateCommand": "sh .devcontainer/cred-install.sh"
+}
