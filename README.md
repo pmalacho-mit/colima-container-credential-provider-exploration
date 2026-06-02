@@ -220,3 +220,4 @@ by all shells. Available to every program, but kept out of `docker inspect`.
   `docker context use colima-secure` before reopening.
 - **`security: ... could not be found`** — seed the Keychain first (step 3); the
   account is `$USER` and the service is `devcred-<name>`.
+- after uninstalling desktop, need to remove `credsStore` config pointing to it
